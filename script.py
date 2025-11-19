@@ -1,182 +1,59 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import re
-import io
-from datetime import datetime
-from docx import Document
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.pagesizes import A4
+from src.analyse import analisar_dataframe, gerar_grafico_categorias
+from src.extract import extract_json, extract_csv
+from src.clean import clean_dataframe
+from src.export import export_to_word
 
-# -------- Função para classificar mensagens --------
-def classificar_mensagem(texto):
-    texto = texto.lower()
-    if any(palavra in texto for palavra in ["consulta", "médico", "retorno"]):
-        return "Consulta"
-    elif any(palavra in texto for palavra in ["exame", "resultado", "teste"]):
-        return "Exame"
-    elif any(palavra in texto for palavra in ["cirurgia", "procedimento", "operação"]):
-        return "Cirurgia"
-    else:
-        return "Outros"
+st.set_page_config(page_title="Ecardio | Analisador", page_icon="logo.png")
 
-# -------- Função para processar arquivos WhatsApp --------
-def processar_arquivos(arquivos):
-    todas_mensagens = []
+st.title("Analisador de Mensagens – Ecardio")
 
-    for arquivo in arquivos:
-        conteudo = arquivo.read().decode("utf-8", errors="ignore")
-        linhas = conteudo.splitlines()
+uploaded_files = st.file_uploader(
+    "Envie arquivos JSON ou CSV",
+    type=["json", "csv"],
+    accept_multiple_files=True
+)
 
-        for linha in linhas:
-            linha = linha.strip()
+if uploaded_files:
+    dfs = []
 
-            # Novo parser genérico (compatível com Android e iPhone)
-            # Exemplo: [10/10/2025, 09:35] João: Olá
-            if "] " in linha and ":" in linha:
-                try:
-                    parte_data, resto = linha.split("] ", 1)
-                    parte_data = parte_data.replace("[", "").strip()
+    for f in uploaded_files:
+        if f.name.endswith(".json"):
+            dfs.append(extract_json(f))
+        else:
+            dfs.append(extract_csv(f))
 
-                    # Divide remetente e mensagem
-                    if ": " in resto:
-                        nome, mensagem = resto.split(": ", 1)
-                        data_str = parte_data.split(",")[0].strip()
-                        hora_str = parte_data.split(",")[1].strip() if "," in parte_data else ""
+    df = pd.concat(dfs, ignore_index=True)
 
-                        categoria = classificar_mensagem(mensagem)
-                        todas_mensagens.append([data_str, hora_str, nome.strip(), mensagem.strip(), categoria])
-                except Exception:
-                    continue  # ignora linhas que não seguem o formato esperado
+    st.success("Arquivos carregados com sucesso!")
 
-    df = pd.DataFrame(todas_mensagens, columns=["Data", "Hora", "Remetente", "Mensagem", "Categoria"])
-    return df
+    # LIMPEZA
+    df = clean_dataframe(df)
 
-# -------- Função para gerar gráficos --------
-import plotly.express as px  # adicione no topo do arquivo
+    # CLASSIFICAÇÃO + TEXTO LIMPO
+    df = analisar_dataframe(df)
 
-def gerar_graficos(df):
-    st.subheader("📈 Quantidade de Mensagens por Categoria")
+    st.subheader("Pré-visualização")
+    st.dataframe(df.head(50), use_container_width=True)
 
-    # Contagem por categoria
-    contagem = df['Categoria'].value_counts().reset_index()
-    contagem.columns = ["Categoria", "Quantidade"]
+    # DEBUG opcional — para ver se a categoria existe
+    st.write("Contagem de categorias detectadas:")
+    st.write(df["categoria"].value_counts())
 
-    # Paleta de cores personalizada
-    cores = {
-        "Consulta": "#3B82F6",  # Azul
-        "Exame": "#10B981",     # Verde
-        "Cirurgia": "#EF4444",  # Vermelho
-        "Outros": "#9CA3AF"     # Cinza
-    }
-
-    # Gráfico de barras interativo (Plotly)
-    fig = px.bar(
-        contagem,
-        x="Categoria",
-        y="Quantidade",
-        color="Categoria",
-        color_discrete_map=cores,
-        text="Quantidade",
-        title="Total de Mensagens por Categoria"
-    )
-
-    fig.update_traces(textposition="outside")
-    fig.update_layout(
-        xaxis_title="Categoria",
-        yaxis_title="Quantidade de Mensagens",
-        showlegend=False,
-        plot_bgcolor="rgba(0,0,0,0)",
-        yaxis=dict(showgrid=True)
-    )
-
+    # GRÁFICO
+    st.subheader("📊 Distribuição de Categorias")
+    fig = gerar_grafico_categorias(df)
     st.plotly_chart(fig, use_container_width=True)
 
-# -------- Funções de exportação --------
-def exportar_excel(df):
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Relatório')
-    return buffer
+    # EXPORTAÇÃO
+    if st.button("Gerar relatório em Word"):
+        output_path = export_to_word(df, "relatorio.docx")
 
-def exportar_word(df):
-    doc = Document()
-    doc.add_heading("Relatório de Conversas WhatsApp", level=1)
-    doc.add_paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-
-    tabela = doc.add_table(rows=1, cols=len(df.columns))
-    hdr_cells = tabela.rows[0].cells
-    for i, col in enumerate(df.columns):
-        hdr_cells[i].text = col
-
-    for _, row in df.iterrows():
-        linha = tabela.add_row().cells
-        for i, val in enumerate(row):
-            linha[i].text = str(val)
-
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-def exportar_pdf(df):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    elementos = [Paragraph("Relatório de Conversas WhatsApp", styles['Title'])]
-    elementos.append(Spacer(1, 12))
-    elementos.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
-    elementos.append(Spacer(1, 12))
-
-    resumo = df['Categoria'].value_counts()
-    for cat, qtd in resumo.items():
-        elementos.append(Paragraph(f"{cat}: {qtd} mensagens", styles['Normal']))
-
-    doc.build(elementos)
-    buffer.seek(0)
-    return buffer
-
-# -------- Interface principal --------
-st.title("Analisador Inteligente de Conversas do WhatsApp - Ecardio")
-st.markdown("Carregue **múltiplos arquivos .txt** exportados do WhatsApp para gerar o relatório semanal.")
-
-arquivos = st.file_uploader("Selecione os arquivos", type=["txt"], accept_multiple_files=True)
-
-if arquivos:
-    with st.spinner("Processando arquivos..."):
-        df = processar_arquivos(arquivos)
-        st.success(f"{len(df)} mensagens processadas com sucesso!")
-
-        gerar_graficos(df)
-
-        st.subheader("📋 Dados Processados")
-        st.dataframe(df)
-
-        st.subheader("📤 Exportar Relatório")
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
+        with open(output_path, "rb") as f:
             st.download_button(
-                "⬇️ Baixar Excel",
-                data=exportar_excel(df),
-                file_name="relatorio_whatsapp.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        with col2:
-            st.download_button(
-                "⬇️ Baixar Word",
-                data=exportar_word(df),
-                file_name="relatorio_whatsapp.docx",
+                label="📄 Baixar Relatório",
+                data=f,
+                file_name="relatorio.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
-        with col3:
-            st.download_button(
-                "⬇️ Baixar PDF",
-                data=exportar_pdf(df),
-                file_name="relatorio_whatsapp.pdf",
-                mime="application/pdf"
-            )
-
-else:
-    st.info("Selecione um ou mais arquivos de conversas para iniciar a análise.")
